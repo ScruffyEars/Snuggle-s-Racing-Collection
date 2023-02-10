@@ -18,70 +18,41 @@
 //Based on Lugburz [2386297] great script
 //Big parts from Brainslug [2323221] awesome script collection
 
-// Whether to show current speed.
-const SHOW_SPEED = GM_getValue('showSpeedChk') != 0;
+//Should current speed be shown at the bottom of the map
+const optionShowSpeed = GM_getValue('showSpeedChk') != 0;
 
 // whether to show the top3 position icon
 const SHOW_POSITION_ICONS = GM_getValue('showPositionIconChk') != 0;
 
 //Should Racing skills be displayed for others, requires API key to query with
 let optionGetRacingSkills = (GM_getValue('apiKey') && GM_getValue('apiKey').length > 0);
-
 //Should Car skins be shown for those having them
 const optionShowCustomCarSkin = GM_getValue('showSkinsChk') != 0;
-
-// Domain for racecar skins
+//Url to brainslugs racing skin data
 const brainslugRaceSkinUrl = 'https://race-skins.brainslug.nl/custom/data';
-const SKIN_IMAGE = id => `https://race-skins.brainslug.nl/assets/${id}`;
-//Used as the time to wait between API batches
-const apiWaitTime = 1500;
-const userID = getUserIdFromCookie();
-var raceId = '*';
-var period = 1000;
-var last_compl = -1.0;
-var x = 0;
-var penaltyNotif = 0;
-var racingSkills = {};
-
-function maybeClear() {
-    if (x != 0 ) {
-        clearInterval(x);
-        last_compl = -1.0;
-        x = 0;
-    }
-}
+//Baseurl to brainslugs racing skin images
+const brainslugSkinImageUrl = 'https://race-skins.brainslug.nl/assets';
 
 //Racing skills stored in the cache
 const cachedRacingSkills = new Map();
 //Flag for when the leaderboard is already being updated
 let leaderBoardUpdating = false;
-
-
-
-
-
+//Used as the time to wait between API batches
+const apiWaitTime = 1500;
+//Used to indicate if the left menu current car is skinned and which skin it is
+let skinnedCarInMenu = null;
+//Used to keep track of running intervals so multiple doesn't stack and break the browser
+let currentSpeedInterval = 0;
+//Stores the last completed % point, used in speed calculation
+let lastCompletedLap = -1.0;
+//Used to indicate the time between recalculating the cars current speed
+let speedCalculationIntervalPeriod = 1000;
+const userID = getUserIdFromCookie();
+var raceId = '*';
+var penaltyNotif = 0;
+var racingSkills = {};
 
 let _skinOwnerCache = null;
-
-let _skinned = false;
-function skinCarSidebar(carSkin) {
-    const carSelected = document.querySelector('.car-selected');
-    if (!carSelected) return; // fail quietly
-    const tornItem = carSelected.querySelector('.torn-item');
-    if (!tornItem) return; // fail quietly
-    if (tornItem !== _skinned) {
-        try {
-            tornItem.setAttribute('src', SKIN_IMAGE(carSkin));
-            tornItem.style.display = 'block';
-            tornItem.style.opacity = 1;
-            const canvas = carSelected.querySelector('canvas');
-            if ( !! canvas) canvas.style.display = 'none';
-            _skinned = tornItem;
-        } catch (err) {
-            console.error(err);
-        }
-    }
-}
 
 function getUserIdFromCookie() {
     const userIdString = document.cookie.split(';')
@@ -95,51 +66,6 @@ function getUserIdFromCookie() {
 function formatDate(date) {
     const month = (+date.getUTCMonth()) + (+1);
     return date.getUTCFullYear() + '-' + pad(month, 2) + '-' + pad(date.getUTCDate(), 2) + ' ' + formatTime(date);
-}
-
-
-function showSpeed() {
-    if (!SHOW_SPEED || $('#racingdetails').size() < 1 || $('#racingdetails').find('#speed_mph').size() > 0)
-        return;
-
-    // save some space
-    $('#racingdetails').find('li.pd-name').each(function() {
-        if ($(this).text() == 'Name:') $(this).hide();
-        if ($(this).text() == 'Position:') $(this).text('Pos:');
-        if ($(this).text() == 'Completion:') $(this).text('Compl:');
-    });
-    $('#racingdetails').append('<li id="speed_mph" class="pd-val"></li>');
-
-    maybeClear();
-
-    x = setInterval(function() {
-        if ($('#racingupdatesnew').find('div.track-info').size() < 1) {
-            maybeClear();
-            return;
-        }
-
-        let laps = $('#racingupdatesnew').find('div.title-black').text().split(" - ")[1].split(" ")[0];
-        let len = $('#racingupdatesnew').find('div.track-info').attr('data-length').replace('mi', '');
-        let compl = $('#racingdetails').find('li.pd-completion').text().replace('%', '');
-
-        if (last_compl >= 0) {
-            let speed = (compl - last_compl) / 100 * laps * len * 60 * 60 * 1000 / period;
-            $('#speed_mph').text(speed.toFixed(2) + 'mph');
-        }
-        last_compl = compl;
-    }, period);
-}
-
-function showPenalty() {
-    if ($('#racingAdditionalContainer').find('div.msg.right-round').size() > 0 &&
-        $('#racingAdditionalContainer').find('div.msg.right-round').text().trim().startsWith('You have recently left')) {
-        const penalty = GM_getValue('leavepenalty') * 1000;
-        const now = Date.now();
-        if (penalty > now) {
-            const date = new Date(penalty);
-            $('#racingAdditionalContainer').find('div.msg.right-round').text('You may join an official race at ' + formatTime(date) + '.');
-        }
-    }
 }
 
 function updateSkill(level) {
@@ -414,10 +340,12 @@ $(document).ajaxComplete((event, xhr, settings) => {
         }
         //We got the right ajax query
         //Append the settings menu
-        $("#racingupdatesnew").ready(addSettingsDiv);
+        $("#racingupdatesnew").ready(CreateSettingsMenu);
+        //Appends speed information below the map if chosen
+        $("#racingupdatesnew").ready(CreateSpeedInformationAndCalculation);
+        //Check if the current user is under penalty for leaving an official race
+        $('#racingAdditionalContainer').ready(CheckForPenaltyAndDisplayTime);
         debugger;
-        $("#racingupdatesnew").ready(showSpeed);
-        $('#racingAdditionalContainer').ready(showPenalty);
         if ($(location).attr('href').includes('sid=racing&tab=log&raceID=')) {
             $('#racingupdatesnew').ready(addPlaybackButton);
         }
@@ -438,9 +366,9 @@ $(document).ajaxComplete((event, xhr, settings) => {
     }
 });
 
-$("#racingupdatesnew").ready(addSettingsDiv);
-$("#racingupdatesnew").ready(showSpeed);
-$('#racingAdditionalContainer').ready(showPenalty);
+$("#racingupdatesnew").ready(CreateSettingsMenu);
+$("#racingupdatesnew").ready(CreateSpeedInformationAndCalculation);
+$('#racingAdditionalContainer').ready(CheckForPenaltyAndDisplayTime);
 
 if ($(location).attr('href').includes('index.php')) {
     $('#mainContainer').ready(displayDailyGains);
@@ -472,7 +400,7 @@ if ((optionGetRacingSkills || optionShowCustomCarSkin) && $(location).attr('href
 /**
  * Append setting options so the user can customize their needs
  */
-function addSettingsDiv() {
+function CreateSettingsMenu() {
     //#TODO: Change to config cog button with a nice menu, styled like Brainslug's
     if ($("#racingupdatesnew").size() > 0 && $('#racingEnhSettings').size() < 1) {
         //Creates the visible options
@@ -556,16 +484,16 @@ async function UpdateLeaderboard() {
         if (optionGetRacingSkills && racingSkills[driverId]) {
             //Get the racing skill & name
             const skill = racingSkills[driverId];
-            const nameDiv = driver.querySelector('.name');
+            const nameDiv = driver.querySelector('li.name');
             nameDiv.style.position = 'relative';
             //If not already added, add the name and racing skill
-            if (!driver.querySelector('.rs-display')) {
+            if (!driver.querySelector('span.rs-display')) {
                 nameDiv.insertAdjacentHTML('beforeend', `<span class="rs-display">RS:${skill}</span>`);
             }
         //Check if racing skills were not picked
         } else if (!optionGetRacingSkills) {
             //Select any racing skills already displayed
-            const rsSpan = driver.querySelector('.rs-display');
+            const rsSpan = driver.querySelector('span.rs-display');
             //Check if any is found remove them
             if (rsSpan) {
                 rsSpan.remove();
@@ -573,11 +501,18 @@ async function UpdateLeaderboard() {
         }
         //Check if skins are to be shown and any was found for the driver
         if (optionShowCustomCarSkin && racingSkins[driverId]) {
-            const carImg = driver.querySelector('.car').querySelector('img');
+            //Gets the current car image & id
+            const carImg = driver.querySelector('li.car').querySelector('img');
             const carId = carImg.getAttribute('src').replace(/[^0-9]*/g, '');
-            if (!!racingSkins[driverId][carId]) {
-                carImg.setAttribute('src', SKIN_IMAGE(racingSkins[driverId][carId]));
-                if (driverId == userID) skinCarSidebar(racingSkins[driverId][carId]);
+            //Checks if there is a skin to be shown
+            if (racingSkins[driverId][carId]) {
+                //Set the skin reference to replace the normal car
+                carImg.setAttribute('src', GetBrainslugsCarSkin(racingSkins[driverId][carId]));
+                //Check if current user, then sidebar should be coloured too
+                if (driverId == userID) {
+                    //Changes the skin on the left menu if applicaple
+                    ChangeCarSkinOnMenu(racingSkins[driverId][carId]);
+                }
             }
         }
     }
@@ -750,4 +685,127 @@ async function GetSkinsForDrivers(driverIds) {
         }
         return result;
     });
+}
+
+/**
+ * Creates the url to brainslugs car skin images
+ * @param {string} skinId Unique Identifier for the skin
+ * @returns image url to the car skin
+ */
+function GetBrainslugsCarSkin (skinId) {
+    return `${brainslugSkinImageUrl}/${skinId}`;
+}
+
+/**
+ * Changes the car skin on the current car in the left menu
+ * @param {string} carSkin Unique identifier for the skin
+ * @returns nothing, but sooner if something is missing in the left menu
+ */
+function ChangeCarSkinOnMenu(carSkin) {
+    //Check if the current car menu is opened
+    const selectedCar = document.querySelector('div.car-selected');
+    if (!selectedCar) {
+        return; //The menu wasn't open, do nothing
+    }
+    //Checks if there is an image shown
+    const carImage = selectedCar.querySelector('img.torn-item');
+    if (!carImage) {
+        return;//No image found, do nothing
+    }
+    //Checks if the item is already skinned with this image
+    if (carImage !== skinnedCarInMenu) {
+        try {
+            //It was not so replace the url and display it
+            carImage.setAttribute('src', GetBrainslugsCarSkin(carSkin));
+            carImage.style.display = 'block';
+            carImage.style.opacity = 1;
+            //Checks if a canvas is place in the menu
+            const canvas = selectedCar.querySelector('canvas');
+            if (canvas) {
+                //Hide it so the car skin can be shown
+                canvas.style.display = 'none';
+            }
+            //Store current selected car skin for future comparison
+            skinnedCarInMenu = carImage;
+        } catch (err) {
+            //An error has occoured log in console, user doesn't need to know
+            console.error(err);
+        }
+    }
+}
+
+/**
+ * Creates the speed information in the information row below the map and sets an interval to calculate the current speed
+ * @returns nothing, but early if the DOM is not ready to calculate or it's already at it
+ */
+function CreateSpeedInformationAndCalculation() {
+    //Checks if the option is checked, that racing details haven't been added or that racing details already have the current speed
+    if (!optionShowSpeed || $('#racingdetails').size() < 1 || $('#racingdetails').find('#speed_mph').size() > 0) {
+        return;//Do nothing
+    }
+
+    //Hide and rename headings to save some space for the speed to fit into
+    $('#racingdetails').find('li.pd-name').each(() => {
+        if ($(this).text() == 'Name:') {
+            $(this).hide();//Hide name, it's obvious anyway
+        } else if ($(this).text() == 'Position:') {
+            $(this).text('Pos:');//Shorten to Pos
+        } else if ($(this).text() == 'Completion:') {
+            $(this).text('Compl:');//Shorten to Compl
+        }
+    });
+    //Append the speed element
+    $('#racingdetails').append('<li id="speed_mph" class="pd-val"></li>');
+    //Clears the speed calculations if an interval was already running
+    ClearSpeedInterval();
+    //Initiates new speed calculations on set interval
+    currentSpeedInterval = setInterval(() => {
+        //Check if the map information is loaded in otherwise wait
+        if ($('#racingupdatesnew').find('div.track-info').size() < 1) {
+            ClearSpeedInterval();//Remove the interval the browser is not ready
+            return;
+        }
+        //Gets the lap count for the race
+        let laps = $('#racingupdatesnew').find('div.title-black').text().split(" - ")[1].split(" ")[0];
+        //Gets the length of the map
+        let length = $('#racingupdatesnew').find('div.track-info').attr('data-length').replace('mi', '');
+        //Gets the current percentage completed of the map
+        let completedPercentage = $('#racingdetails').find('li.pd-completion').text().replace('%', '');
+        //Check if the race has started, checked by seeing if the car has moved off the start line last checkup
+        if (lastCompletedLap >= 0) {
+            //Calculate the current speed, by figuring how much was completed since last, check it with the laps needed and the length of those laps, upped to hours, devided by how often is checked
+            let speed = (completedPercentage - lastCompletedLap) / 100 * laps * length * 60 * 60 * 1000 / speedCalculationIntervalPeriod;
+            $('#speed_mph').text(`${speed.toFixed(2)}mph`);
+        }
+        //Store new completed %'s for next calculations
+        lastCompletedLap = completedPercentage;
+    }, speedCalculationIntervalPeriod);
+}
+
+/**
+ * Clears the current running speed calculations interval if set
+ */
+function ClearSpeedInterval() {
+    if (currentSpeedInterval != 0 ) {
+        clearInterval(currentSpeedInterval);
+        lastCompletedLap = -1.0;
+        currentSpeedInterval = 0;
+    }
+}
+
+/**
+ * Checks if there's a penalty on the user and they cannot join an official race right now
+ */
+function CheckForPenaltyAndDisplayTime() {
+    //Checks if you have a penalty for leaving an official race resently
+    if ($('#racingAdditionalContainer').find('div.msg.right-round').size() > 0 && $('#racingAdditionalContainer').find('div.msg.right-round').text().trim().startsWith('You have recently left')) {
+        //Checks how much time remains
+        const penaltyTime = GM_getValue('leavepenalty') * 1000;
+        const currentDateTime = Date.now();
+        if (penaltyTime > currentDateTime) {
+            //Display when the user is able to join a new official race
+            const date = new Date(penaltyTime);
+            $('#racingAdditionalContainer').find('div.msg.right-round').text(`You may join an official race at ${formatTime(date)}.`);
+        }
+    }
 }

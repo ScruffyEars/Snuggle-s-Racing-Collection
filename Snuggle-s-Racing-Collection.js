@@ -24,18 +24,19 @@ const SHOW_SPEED = GM_getValue('showSpeedChk') != 0;
 // whether to show the top3 position icon
 const SHOW_POSITION_ICONS = GM_getValue('showPositionIconChk') != 0;
 
-// Whether to fetch others' racing skill from the API (requires API key).
-let FETCH_RS = !!(GM_getValue('apiKey') && GM_getValue('apiKey').length > 0);
+//Should Racing skills be displayed for others, requires API key to query with
+let optionGetRacingSkills = (GM_getValue('apiKey') && GM_getValue('apiKey').length > 0);
 
-// Whether to show car skins
-const SHOW_SKINS = GM_getValue('showSkinsChk') != 0;
+//Should Car skins be shown for those having them
+const optionShowCustomCarSkin = GM_getValue('showSkinsChk') != 0;
 
 // Domain for racecar skins
-const SKIN_AWARDS = 'https://race-skins.brainslug.nl/custom/data';
+const brainslugRaceSkinUrl = 'https://race-skins.brainslug.nl/custom/data';
 const SKIN_IMAGE = id => `https://race-skins.brainslug.nl/assets/${id}`;
-
+//Used as the time to wait between API batches
+const apiWaitTime = 1500;
 const userID = getUserIdFromCookie();
-var RACE_ID = '*';
+var raceId = '*';
 var period = 1000;
 var last_compl = -1.0;
 var x = 0;
@@ -50,138 +51,17 @@ function maybeClear() {
     }
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+//Racing skills stored in the cache
+const cachedRacingSkills = new Map();
+//Flag for when the leaderboard is already being updated
+let leaderBoardUpdating = false;
 
-// Shared racing skill
-const racingSkillCacheByDriverId = new Map();
 
-let updating = false;
-async function updateDriversList() {
-    const driversList = document.getElementById('leaderBoard');
-    if (updating || driversList === null) {
-        return;
-    }
 
-    FETCH_RS = !!(GM_getValue('apiKey') && GM_getValue('apiKey').length > 0);
 
-    watchForDriversListContentChanges(driversList);
 
-    const driverIds = getDriverIds(driversList);
-    if (!driverIds || !driverIds.length) {
-        return;
-    }
-
-    updating = true;
-    $('#updating').size() < 1 && $('#racingupdatesnew').prepend('<div id="updating" style="color: green; font-size: 12px; line-height: 24px;">Updating drivers\' RS and skins...</div>');
-
-    racingSkills = FETCH_RS ? await getRacingSkillForDrivers(driverIds) : {};
-    const racingSkins = SHOW_SKINS ? await getRacingSkinOwners(driverIds) : {};
-    for (let driver of driversList.querySelectorAll('.driver-item')) {
-        const driverId = getDriverId(driver);
-        if (FETCH_RS && !!racingSkills[driverId]) {
-            const skill = racingSkills[driverId];
-            const nameDiv = driver.querySelector('.name');
-            nameDiv.style.position = 'relative';
-            if ( ! driver.querySelector('.rs-display')) {
-                nameDiv.insertAdjacentHTML('beforeend', `<span class="rs-display">RS:${skill}</span>`);
-            }
-        } else if (!FETCH_RS) {
-            const rsSpan = driver.querySelector('.rs-display');
-            if ( !! rsSpan) {
-                rsSpan.remove();
-            }
-        }
-        if (SHOW_SKINS && !!racingSkins[driverId]) {
-            const carImg = driver.querySelector('.car').querySelector('img');
-            const carId = carImg.getAttribute('src').replace(/[^0-9]*/g, '');
-            if (!!racingSkins[driverId][carId]) {
-                carImg.setAttribute('src', SKIN_IMAGE(racingSkins[driverId][carId]));
-                if (driverId == userID) skinCarSidebar(racingSkins[driverId][carId]);
-            }
-        }
-    }
-
-    updating = false;
-    $('#updating').size() > 0 && $('#updating').remove();
-}
-
-function watchForDriversListContentChanges(driversList) {
-    if (driversList.dataset.hasWatcher !== undefined) {
-        return;
-    }
-
-    // The content of #leaderBoard is rebuilt periodically so watch for changes:
-    new MutationObserver(updateDriversList).observe(driversList, {childList: true});
-    driversList.dataset.hasWatcher = 'true';
-}
-
-function getDriverIds(driversList) {
-    return Array.from(driversList.querySelectorAll('.driver-item')).map(driver => getDriverId(driver));
-}
-
-function getDriverId(driverUl) {
-    return +driverUl.closest('li').id.substr(4);
-}
-
-let racersCount = 0;
-async function getRacingSkillForDrivers(driverIds) {
-    const driverIdsToFetchSkillFor = driverIds.filter(driverId => ! racingSkillCacheByDriverId.has(driverId));
-    for (const driverId of driverIdsToFetchSkillFor) {
-        const json = await fetchRacingSkillForDrivers(driverId);
-        racingSkillCacheByDriverId.set(+driverId, json && json.personalstats && json.personalstats.racingskill ? json.personalstats.racingskill : 'N/A');
-        if (json && json.error) {
-            $('#racingupdatesnew').prepend(`<div style="color: red; font-size: 12px; line-height: 24px;">API error: ${JSON.stringify(json.error)}</div>`);
-            break;
-        }
-        racersCount++;
-        if (racersCount > 20) await sleep(1500);
-    }
-
-    const resultHash = {};
-    for (const driverId of driverIds) {
-        const skill = racingSkillCacheByDriverId.get(driverId);
-        if (!!skill) {
-            resultHash[driverId] = skill;
-        }
-    }
-    return resultHash;
-}
 
 let _skinOwnerCache = null;
-async function getRacingSkinOwners(driverIds) {
-    function filterSkins(skins) {
-        let result = {};
-        for (const driverId of driverIds) {
-            if (!!skins && !!skins['*'] && !!skins['*'][driverId]) {
-                result[driverId] = skins['*'][driverId];
-            }
-            if (!!skins && !!skins[RACE_ID] && !!skins[RACE_ID][driverId]) {
-                result[driverId] = skins[RACE_ID][driverId];
-            }
-        }
-        return result;
-    }
-    return new Promise(resolve => {
-        // fetching the list once per page load should be enough
-        if (!!_skinOwnerCache) return resolve(_skinOwnerCache);
-        // fetch and filter the owners
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: SKIN_AWARDS,
-            headers: {'Content-Type': 'application/json'},
-            onload: ({responseText}) => {
-                _skinOwnerCache = JSON.parse(responseText);
-                resolve(_skinOwnerCache);
-            },
-            onerror: (err) => {
-                console.error(err);
-                resolve({});
-            },
-        });
-    }).then(filterSkins);
-}
 
 let _skinned = false;
 function skinCarSidebar(carSkin) {
@@ -217,28 +97,6 @@ function formatDate(date) {
     return date.getUTCFullYear() + '-' + pad(month, 2) + '-' + pad(date.getUTCDate(), 2) + ' ' + formatTime(date);
 }
 
-function fetchRacingSkillForDrivers(driverIds) {
-    const apiKey = GM_getValue('apiKey');
-    return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-            method: 'POST',
-            url: `https://api.torn.com/user/${driverIds}?selections=personalstats&comment=RacingUiUx&key=${apiKey}`,
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            onload: (response) => {
-                try {
-                    resolve(JSON.parse(response.responseText));
-                } catch(err) {
-                    reject(err);
-                }
-            },
-            onerror: (err) => {
-                reject(err);
-            }
-        });
-    });
-}
 
 function showSpeed() {
     if (!SHOW_SPEED || $('#racingdetails').size() < 1 || $('#racingdetails').find('#speed_mph').size() > 0)
@@ -349,8 +207,8 @@ function parseRacingData(data) {
 
     // display race link
     if ($('#raceLink').size() < 1) {
-        RACE_ID = data.raceID;
-        const raceLink = `<a id="raceLink" href="https://www.torn.com/loader.php?sid=racing&tab=log&raceID=${RACE_ID}" style="float: right; margin-left: 12px;">Link to the race</a>`;
+        raceId = data.raceID;
+        const raceLink = `<a id="raceLink" href="https://www.torn.com/loader.php?sid=racing&tab=log&raceID=${raceId}" style="float: right; margin-left: 12px;">Link to the race</a>`;
         $(raceLink).insertAfter('#racingEnhSettings');
     }
 
@@ -444,45 +302,6 @@ function showResults(results, start = 0) {
                 $(this).find('li.name').html($(this).find('li.name').html().replace(name, ((SHOW_POSITION_ICONS && position) ? `<i class="race_position ${position}"></i>` : '') + `${name} ${place} ${result}` + (bestLap ? ` (best: ${bestLap})` : '')));
                 return false;
             }
-        });
-    }
-}
-
-/**
- * Append setting options so the user can customize their needs
- */
-function addSettingsDiv() {
-    //#TODO: Change to config cog button with a nice menu, styled like Brainslug's
-    if ($("#racingupdatesnew").size() > 0 && $('#racingEnhSettings').size() < 1) {
-        //Creates the visible options
-        const div = '<div style="font-size: 12px; line-height: 24px; padding-left: 10px; padding-right: 10px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); border-radius: 5px;">' +
-              '<a id="racingEnhSettings" style="text-align: right; cursor: pointer;">Settings</a>' +
-              '<div id="racingEnhSettingsContainer" style="display: none;"><ul style="color: #ddd;">' +
-              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showSpeedChk"><label>Show current speed</label></li>' +
-              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showSkinsChk"><label>Show racing skins</label></li>' +
-              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showPositionIconChk"><label>Show position icons</label></li>' +
-              '<li><label>Fetch racing skill from the API (<a href="https://www.torn.com/preferences.php#tab=api">link to your API key</a>)</label><span class="input-wrap" style="margin: 0px 5px 5px;">' +
-              '<input type="text" autocomplete="off" data-lpignore="true" id="apiKey"></span>' +
-              '<a href="#" id="saveApiKey" class="link btn-action-tab tt-modified"><i style="display: inline-block; background: url(/images/v2/racing/car_enlist.png) 0 0 no-repeat; vertical-align: middle; height: 15px; width: 15px;"></i>Save</a></li></ul></div></div>';
-        $('#racingupdatesnew').prepend(div);
-
-        //Change checkboxes based on saved settings
-        $('#racingEnhSettingsContainer').find('input[type=checkbox]').each(function() {
-            $(this).prop('checked', GM_getValue($(this).attr('id')) != 0);
-        });
-        $('#apiKey').val(GM_getValue('apiKey'));
-
-        $('#racingEnhSettings').on('click', () => $('#racingEnhSettingsContainer').toggle());
-        $('#racingEnhSettingsContainer').on('click', 'input', function() {
-            const id = $(this).attr('id');
-            const checked = $(this).prop('checked');
-            GM_setValue(id, checked ? 1 : 0);
-        });
-        $('#saveApiKey').click(event => {
-            event.preventDefault();
-            event.stopPropagation();
-            GM_setValue('apiKey', $('#apiKey').val());
-            updateDriversList();
         });
     }
 }
@@ -593,9 +412,10 @@ $(document).ajaxComplete((event, xhr, settings) => {
         if (page != "loader") {
             return;//Do nothing
         }
-        debugger;
         //We got the right ajax query
+        //Append the settings menu
         $("#racingupdatesnew").ready(addSettingsDiv);
+        debugger;
         $("#racingupdatesnew").ready(showSpeed);
         $('#racingAdditionalContainer').ready(showPenalty);
         if ($(location).attr('href').includes('sid=racing&tab=log&raceID=')) {
@@ -639,10 +459,295 @@ $('#racingupdatesnew').ready(function() {
 
 checkPenalty();
 
-if ((FETCH_RS || SHOW_SKINS) && $(location).attr('href').includes('sid=racing')) {
+if ((optionGetRacingSkills || optionShowCustomCarSkin) && $(location).attr('href').includes('sid=racing')) {
     $("#racingupdatesnew").ready(function() {
-        updateDriversList();
+        UpdateLeaderboard();
         // On change race tab, (re-)insert the racing skills if applicable:
-        new MutationObserver(updateDriversList).observe(document.getElementById('racingAdditionalContainer'), {childList: true});
+        new MutationObserver(UpdateLeaderboard).observe(document.getElementById('racingAdditionalContainer'), {childList: true});
+    });
+}
+
+
+
+/**
+ * Append setting options so the user can customize their needs
+ */
+function addSettingsDiv() {
+    //#TODO: Change to config cog button with a nice menu, styled like Brainslug's
+    if ($("#racingupdatesnew").size() > 0 && $('#racingEnhSettings').size() < 1) {
+        //Creates the visible options
+        const div = '<div style="font-size: 12px; line-height: 24px; padding-left: 10px; padding-right: 10px; background: repeating-linear-gradient(90deg,#242424,#242424 2px,#2e2e2e 0,#2e2e2e 4px); border-radius: 5px;">' +
+              '<a id="racingEnhSettings" style="text-align: right; cursor: pointer;">Settings</a>' +
+              '<div id="racingEnhSettingsContainer" style="display: none;"><ul style="color: #ddd;">' +
+              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showSpeedChk"><label>Show current speed</label></li>' +
+              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showSkinsChk"><label>Show racing skins</label></li>' +
+              '<li><input type="checkbox" style="margin-left: 5px; margin-right: 5px" id="showPositionIconChk"><label>Show position icons</label></li>' +
+              '<li><label>Fetch racing skill from the API (<a href="https://www.torn.com/preferences.php#tab=api">link to your API key</a>)</label><span class="input-wrap" style="margin: 0px 5px 5px;">' +
+              '<input type="text" autocomplete="off" data-lpignore="true" id="apiKey"></span>' +
+              '<a href="#" id="saveApiKey" class="link btn-action-tab tt-modified"><i style="display: inline-block; background: url(/images/v2/racing/car_enlist.png) 0 0 no-repeat; vertical-align: middle; height: 15px; width: 15px;"></i>Save</a></li></ul></div></div>';
+        $('#racingupdatesnew').prepend(div);
+
+        //Change checkboxes based on saved settings
+        $('#racingEnhSettingsContainer').find('input[type=checkbox]').each(function() {
+            //Access Tampermonkey storage to get users earlier choice
+            $(this).prop('checked', GM_getValue($(this).attr('id')) != 0);
+        });
+        //Gets the stored API key from Tampermonkey storage
+        $('#apiKey').val(GM_getValue('apiKey'));
+        //Setting up the click event for the settings Text
+        $('#racingEnhSettings').on('click', () => {
+            //Toggles the settings container
+            $('#racingEnhSettingsContainer').toggle();
+        });
+        //Setup click events for the inputs in the settings menu
+        $('#racingEnhSettingsContainer').on('click', 'input', function() {
+            const id = $(this).attr('id');
+            const checked = $(this).prop('checked');
+            //Store the choice in the Tampermonkey storage
+            GM_setValue(id, checked ? 1 : 0);
+        });
+        //Click event for when the save API key button is pressed
+        $('#saveApiKey').click(event => {
+            event.preventDefault();
+            event.stopPropagation();
+            //Store the API key in the Tampermonkey storage
+            GM_setValue('apiKey', $('#apiKey').val());
+            //Update the leaderboard, now with changed permissions
+            UpdateLeaderboard();
+        });
+    }
+}
+
+/**
+ * Updates the presented driver leaderboard list below the map
+ */
+async function UpdateLeaderboard() {
+    //Gets the current leaderboard element
+    const leaderBoard = document.getElementById('leaderBoard');
+    //If a process is already updating or the leaderboard isn't loaded, skip
+    if (leaderBoardUpdating || leaderBoard === null) {
+        return;//Do Nothing
+    }
+    //Check if the API key is setup, so Racing Skill can be gathered
+    optionGetRacingSkills = (GM_getValue('apiKey') && GM_getValue('apiKey').length > 0);
+    //Initiates a Mutation observer on the leaderboard, if one is not already present
+    WatchLeaderBoardForChanges(leaderBoard);
+    //Grabs the driver ids from the leaderboard object
+    const driverIds = GetDriverIds(leaderBoard);
+    //if no drivers were found, because it wasn't properly loaded yet, wait
+    if (!driverIds || !driverIds.length) {
+        return;//Do Nothing
+    }
+    //Flagging that an update to the leaderboard is underway
+    leaderBoardUpdating = true;
+    //Append the updating text so the user knows the script is working
+    if ($('#updating').size() < 1) {
+        $('#racingupdatesnew').prepend('<div id="updating" style="color: green; font-size: 12px; line-height: 24px;">Updating drivers\' RS and skins...</div>');
+    }
+    //Gets the racing skill of the drivers involved, if the API key is supplied
+    racingSkills = optionGetRacingSkills ? await GetRacingSkillForDrivers(driverIds) : {};
+    //Gets the racing skins from Brainslugs server
+    const racingSkins = optionShowCustomCarSkin ? await GetSkinsForDrivers(driverIds) : {};
+    //Iterate through all drivers and assign the racing skills and skins
+    for (let driver of leaderBoard.querySelectorAll('ul.driver-item')) {
+        //Get Unique identifier for the current driver
+        const driverId = GetDriverId(driver);
+        //Check if racing skills are to be appended and any was added for the driver
+        if (optionGetRacingSkills && racingSkills[driverId]) {
+            //Get the racing skill & name
+            const skill = racingSkills[driverId];
+            const nameDiv = driver.querySelector('.name');
+            nameDiv.style.position = 'relative';
+            //If not already added, add the name and racing skill
+            if (!driver.querySelector('.rs-display')) {
+                nameDiv.insertAdjacentHTML('beforeend', `<span class="rs-display">RS:${skill}</span>`);
+            }
+        //Check if racing skills were not picked
+        } else if (!optionGetRacingSkills) {
+            //Select any racing skills already displayed
+            const rsSpan = driver.querySelector('.rs-display');
+            //Check if any is found remove them
+            if (rsSpan) {
+                rsSpan.remove();
+            }
+        }
+        //Check if skins are to be shown and any was found for the driver
+        if (optionShowCustomCarSkin && racingSkins[driverId]) {
+            const carImg = driver.querySelector('.car').querySelector('img');
+            const carId = carImg.getAttribute('src').replace(/[^0-9]*/g, '');
+            if (!!racingSkins[driverId][carId]) {
+                carImg.setAttribute('src', SKIN_IMAGE(racingSkins[driverId][carId]));
+                if (driverId == userID) skinCarSidebar(racingSkins[driverId][carId]);
+            }
+        }
+    }
+    //Flagging that an update to the leaderboard has finished
+    leaderBoardUpdating = false;
+    //Remove the updating text so the user knows the script is Finished
+    if ($('#updating').size() > 0) {
+        $('#updating').remove();
+    }
+}
+
+/**
+ * Initiated a mutation observer on the leaderboard supplied
+ * @param {HTMLElement} leaderBoard The leaderboard to observe for changes
+ * @returns Does nothing if there's already a watcher on the leaderboard
+ */
+function WatchLeaderBoardForChanges(leaderBoard) {
+    //Check if there is already a watcher on the leaderboards dataset
+    if (leaderBoard.dataset.hasWatcher !== undefined) {
+        return;//Do nothing
+    }
+    //Watching for changes as these come in from Torn and other functions, if a change is made, calls updateLeaderboard
+    new MutationObserver(UpdateLeaderboard).observe(leaderBoard, {childList: true});
+    //Note down that there is an observer watching this dataset, so it doesn't lead to stacked MutationObservers
+    leaderBoard.dataset.hasWatcher = 'true';
+}
+
+/**
+ * Gets all driver Id's from the leaderboard
+ * @param {HTMLElement} leaderBoard The leaderboard to get drivers from
+ * @returns An array of the Id's for the drivers
+ */
+function GetDriverIds(leaderBoard) {
+    //Goes through the leaderboard looking for the ul containers 
+    return Array.from(leaderBoard.querySelectorAll('ul.driver-item')).map((driver) => {
+        //Gets the driver Id and adds that to the array
+        return GetDriverId(driver);
+    });
+}
+
+/**
+ * Gets the driver id for the supplied driver ul
+ * @param {HTMLElement} driverUl The Ul tag containing the drivers information
+ * @returns The unique Id of the driver
+ */
+function GetDriverId(driverUl) {
+    //Steps up and gets the parent container, which has the user Id
+    return driverUl.closest('li').id.substring(4);
+}
+
+/**
+ * Collects and returns all the racing skills for drivers
+ * @param {string[]} driverIds Array containing the unique identifiers for the racers
+ * @returns An object containing the driver Id's as attributes, with the skill as the value of that attribute
+ */
+async function GetRacingSkillForDrivers(driverIds) {
+    //Checks which driver Id's haven't already been fetched
+    const driverIdsMissingRacingSkill = driverIds.filter((driverId) => {
+        //Checks if the driver is already stored in cache storage
+        return !cachedRacingSkills.has(driverId);
+    });
+    //Iterates through the missing driver Id's
+    for (let index = 0; index < driverIdsMissingRacingSkill.length; index++) {
+        //Calls the Torn API to get the drivers racing skill
+        const json = await GetRacingSkillFromAPI(driverIdsMissingRacingSkill[index]);
+
+        //Check if the Racing skills is available and put that in the storage, if something went wrong note it wasn't avaiable
+        cachedRacingSkills.set(driverIdsMissingRacingSkill[index], json && json.personalstats && json.personalstats.racingskill ? json.personalstats.racingskill : 'N/A');
+        //Check if there was any error message 
+        if (json && json.error) {
+            //Display error to the user and stop
+            $('#racingupdatesnew').prepend(`<div style="color: red; font-size: 12px; line-height: 24px;">API error: ${JSON.stringify(json.error)}</div>`);
+            break;
+        }
+        //Count up racers
+        index++;
+        if (index % 20) {
+            //For every 20 racers wait a bit to let torn cooldown
+            await new Promise((resolve) => {
+                setTimeout(resolve, apiWaitTime);
+            });
+        }
+    }
+    //Build result object
+    const resultHash = {};
+    for (const driverId of driverIds) {
+        //Grabs the cached skill
+        const skill = cachedRacingSkills.get(driverId);
+        if (skill) {
+            //Assign object attribute driverId with skill as value
+            resultHash[driverId] = skill;
+        }
+    }
+    return resultHash;
+}
+
+/**
+ * Returns the supplied drivers racing skill
+ * @param {string} driverId unique identifier for the driver
+ * @returns JSON response object from the server on success
+ */
+function GetRacingSkillFromAPI(driverId) {
+    //Grabs the API key from Tampermonkey storage
+    const apiKey = GM_getValue('apiKey');
+    return new Promise((resolve, reject) => {
+        //Calls on Tampermonkey to make the HTTP request to Torn
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `https://api.torn.com/user/${driverId}?selections=personalstats&comment=RacingUiUx&key=${apiKey}`,
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            onload: (response) => {
+                //Successfully got a response
+                try {
+                    //Attempt to convert the response to JSON and return this to the caller
+                    resolve(JSON.parse(response.responseText));
+                } catch(err) {
+                    //Couldn't parse it to JSON, must be an error
+                    reject(err);
+                }
+            },
+            onerror: (err) => {
+                //Oh no an error has occured
+                reject(err);
+            }
+        });
+    });
+}
+
+/**
+ * Gets race skils from brainslugs domain
+ * @param {string[]} driverIds Array of unique Id's to check for skins
+ * @returns object containing the skins available to the drivers
+ */
+async function GetSkinsForDrivers(driverIds) {
+    return new Promise(resolve => {
+        //Checks if the skins have already been collected, if so returns those
+        if (_skinOwnerCache) {
+            return resolve(_skinOwnerCache);
+        }
+        //Calls on Tampermonkey to make the HTTP request to Torn
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: brainslugRaceSkinUrl,
+            headers: {'Content-Type': 'application/json'},
+            onload: ({responseText}) => {
+                //Success parse the JSON and reutnr it
+                _skinOwnerCache = JSON.parse(responseText);
+                resolve(_skinOwnerCache);
+            },
+            onerror: (err) => {
+                //Error occoured, this is not critical to the experience, so fail silently and return as if none was available
+                console.error(err);
+                resolve({});
+            },
+        });
+    }).then((skins) => {
+        //Successfully gor the skins now back them into a nice result object
+        let result = {};
+        for (const driverId of driverIds) {
+            //Check if the driver Id is in the mixed pool
+            if (skins && skins['*'] && skins['*'][driverId]) {
+                result[driverId] = skins['*'][driverId];
+            }
+            //Check if the driver Id is in a race specific pool
+            if (skins && skins[raceId] && skins[raceId][driverId]) {
+                result[driverId] = skins[raceId][driverId];
+            }
+        }
+        return result;
     });
 }
